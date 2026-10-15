@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { AudioLines, ChevronRight, Download, Headphones, Mic2, Play, Plus, Radio, Sparkles, Waves } from 'lucide-react';
+import { AudioLines, ChevronRight, Download, Headphones, Mic2, Play, Radio, Sparkles, Upload, Waves } from 'lucide-react';
 import { Button } from './components/arc/button/button';
 import { Textarea } from './components/arc/textarea/textarea';
 import { Select } from './components/arc/select/select';
@@ -12,7 +12,7 @@ import './components/arc/foundation.css';
 import './style.css';
 
 type Model = {id:string;name:string;family:string;found:boolean;assets_ready:boolean;control:string;description:string};
-type Profile = {id:string;name:string;transcript:string};
+type Profile = {id:string;name:string;transcript:string;duration_seconds?:number};
 type Event = {type:string;message?:string;url?:string;index?:number;total?:number;segments?:number};
 const speakerNames=['Ryan','Aiden','Vivian','Serena','Uncle_Fu','Dylan','Eric','Ono_Anna','Sohee'];
 const moods:Record<string,string>={Neutral:'',Warm:'Speak in a warm, reassuring tone.',Joyful:'Speak with natural joy and a bright, smiling voice.',Melancholic:'Speak softly with a reflective, sad emotion.',Excited:'Speak with lively excitement and energy.',Serious:'Speak with a measured, serious tone.',Whisper:'Speak in a quiet, intimate whisper.'};
@@ -23,26 +23,48 @@ function App(){
   const [text,setText]=useState(defaults.text),[voice,setVoice]=useState(defaults.voice),[mode,setMode]=useState(defaults.mode),[mood,setMood]=useState(defaults.mood),[style,setStyle]=useState(defaults.style);
   const [profileId,setProfileId]=useState(''),[voiceSource,setVoiceSource]=useState('builtin'),[exaggeration,setExaggeration]=useState(.5),[cfg,setCfg]=useState(.5),[temperature,setTemperature]=useState(.8),[topP,setTopP]=useState(.9),[topK,setTopK]=useState(100),[repetition,setRepetition]=useState(1.2);
   const [generating,setGenerating]=useState(false),[progress,setProgress]=useState(''),[error,setError]=useState(''),[result,setResult]=useState('');
-  const [profileName,setProfileName]=useState(''),[profileTranscript,setProfileTranscript]=useState(''),[profileFile,setProfileFile]=useState<File|null>(null),[showProfile,setShowProfile]=useState(false);
+  const [referenceTranscript,setReferenceTranscript]=useState(''),[referenceFile,setReferenceFile]=useState<File|null>(null),[savingReference,setSavingReference]=useState(false);
+  const [referenceError,setReferenceError]=useState('');
   const loadSerial=useRef(0), modelIdRef=useRef(modelId), playQueue=useRef<string[]>([]), player=useRef<HTMLAudioElement|null>(null);
   modelIdRef.current=modelId;
   const selected=models.find(m=>m.id===modelId);
   const supportsReference=selected?.control==='reference'||selected?.family==='chatterbox'||selected?.control==='context';
+  const needsTranscript=selected?.control==='reference'||selected?.control==='context';
+  const eligibleProfiles=profiles.filter(profile=>(!needsTranscript||!!profile.transcript)&&(!(selected?.control==='tags')||profile.duration_seconds===undefined||profile.duration_seconds>5));
+  const activeProfileId=eligibleProfiles.some(profile=>profile.id===profileId)?profileId:'';
   const cloneActive=selected?.control==='reference'||(supportsReference&&voiceSource==='clone');
-  const canGenerate=!!selected?.assets_ready && loaded===modelId && !loading && !generating && !!text.trim() && (!cloneActive || !!profileId);
+  const canGenerate=!!selected?.assets_ready && loaded===modelId && !loading && !generating && !savingReference && !!text.trim() && (!cloneActive || !!activeProfileId);
   useEffect(()=>{fetch('/api/models').then(r=>r.json()).then(data=>{setModels(data.models);setLoaded(data.loaded||'');}).catch(()=>setLoadError('Local server is unavailable. Start the launcher first.'));fetch('/api/profiles').then(r=>r.json()).then(setProfiles).catch(()=>{});},[]);
   async function loadModel(targetId:string){const serial=++loadSerial.current;setLoading(true);setLoadError('');setLoaded('');try{const response=await fetch('/api/load',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model_id:targetId})});const data=await response.json();if(!response.ok)throw new Error(data.detail||'Load failed');if(serial===loadSerial.current){setLoaded(targetId);return true}return false}catch(e){if(serial===loadSerial.current)setLoadError((e as Error).message);return false}finally{if(serial===loadSerial.current)setLoading(false)}}
   useEffect(()=>{if(!models.length)return; const target=models.find(m=>m.id===modelId); if(!target?.assets_ready){setLoaded('');setLoadError(target?.found?'Local checkpoint is incomplete.':'Checkpoint not found on disk.');return} void loadModel(modelId);},[modelId,models.length]);
-  useEffect(()=>{setResult('');setError('');setProgress('');setVoice(modelId==='csm-1b'?'0':'Ryan');setProfileId('');setVoiceSource('builtin');setShowProfile(false);setStyle(modelId==='qwen-17-design'?'An intimate, expressive English voice with natural pacing and a gentle warmth.':moods.Warm);},[modelId]);
+  useEffect(()=>{setResult('');setError('');setProgress('');setVoice(modelId==='csm-1b'?'0':'Ryan');setReferenceError('');setStyle(modelId==='qwen-17-design'?'An intimate, expressive English voice with natural pacing and a gentle warmth.':moods.Warm);},[modelId]);
   function changeMood(value:string[]){let name=value[0]||'Neutral';setMood(name);setStyle(moods[name]);}
   function addTag(tag:string){setText(previous=>previous+(previous.endsWith(' ')?'':' ')+tag+' ');}
   function enqueue(url:string){playQueue.current.push(url);if(!player.current || player.current.paused)playNext();}
   function playNext(){let url=playQueue.current.shift();if(!url){player.current=null;return}let audio=new Audio(url);player.current=audio;audio.onended=playNext;audio.onerror=playNext;audio.play().catch(()=>setProgress('Audio is ready; press play on the final result.'));}
   async function generate(){if(!canGenerate)return;setGenerating(true);setError('');setResult('');setProgress(mode==='stream'?'Preparing first sentence…':'Rendering complete audio…');playQueue.current=[];
-    try{const response=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model_id:modelId,text,mode,voice,style,profile_id:cloneActive?profileId:'',exaggeration,cfg_weight:cfg,temperature,top_p:topP,top_k:topK,repetition_penalty:repetition})});if(!response.ok){let data=await response.json();throw new Error(data.detail||'Generation failed')}if(!response.body)throw new Error('Streaming response unavailable');let reader=response.body.getReader(),decoder=new TextDecoder(),buffer='',finished=false;while(true){let {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});let lines=buffer.split('\n');buffer=lines.pop()||'';for(let line of lines){if(!line.trim())continue;let event=JSON.parse(line) as Event;if(event.type==='error')throw new Error(event.message||'Generation failed');if(event.type==='chunk'&&event.url){setProgress(`Sentence ${event.index} of ${event.total} ready`);enqueue(event.url)}if(event.type==='progress')setProgress(`Rendered ${event.index} of ${event.total} passages`);if(event.type==='done'&&event.url){finished=true;setResult(event.url);setProgress(`${event.segments||1} passage${event.segments===1?'':'s'} rendered`);}}}if(!finished)throw new Error('Audio stream ended before the final WAV was ready')}
+    try{const response=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model_id:modelId,text,mode,voice,style,profile_id:cloneActive?activeProfileId:'',exaggeration,cfg_weight:cfg,temperature,top_p:topP,top_k:topK,repetition_penalty:repetition})});if(!response.ok){let data=await response.json();throw new Error(data.detail||'Generation failed')}if(!response.body)throw new Error('Streaming response unavailable');let reader=response.body.getReader(),decoder=new TextDecoder(),buffer='',finished=false;while(true){let {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});let lines=buffer.split('\n');buffer=lines.pop()||'';for(let line of lines){if(!line.trim())continue;let event=JSON.parse(line) as Event;if(event.type==='error')throw new Error(event.message||'Generation failed');if(event.type==='chunk'&&event.url){setProgress(`Sentence ${event.index} of ${event.total} ready`);enqueue(event.url)}if(event.type==='progress')setProgress(`Rendered ${event.index} of ${event.total} passages`);if(event.type==='done'&&event.url){finished=true;setResult(event.url);setProgress(`${event.segments||1} passage${event.segments===1?'':'s'} rendered`);}}}if(!finished)throw new Error('Audio stream ended before the final WAV was ready')}
     catch(e){const message=(e as Error).message;setError(message);setProgress('Restoring the selected model…');const restored=modelIdRef.current===modelId&&await loadModel(modelId);if(restored&&message==='Select and load this model first')setError('');setProgress(restored?'Model ready. You can generate again.':'')}
     finally{setGenerating(false);}}
-  async function saveProfile(){if(!profileFile)return;try{let base64=await new Promise<string>((resolve,reject)=>{let reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('Could not read WAV'));reader.readAsDataURL(profileFile)});let response=await fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:profileName||profileFile.name,transcript:profileTranscript,audio_base64:base64})});let data=await response.json();if(!response.ok)throw new Error(data.detail||'Upload failed');setProfiles(previous=>[...previous,data]);setProfileId(data.id);setShowProfile(false);setProfileFile(null);setProfileName('');setProfileTranscript('');}catch(e){setError((e as Error).message)}}
+  function chooseReference(file:File|null){
+    if(!file)return;
+    setProfileId('');setReferenceFile(null);
+    if(!/\.wav$/i.test(file.name)){setReferenceError('Choose a WAV reference recording.');return}
+    if(file.size>20_000_000){setReferenceError('Reference WAV must be 20 MB or smaller.');return}
+    setReferenceFile(file);setReferenceError('');
+    if(!needsTranscript)void saveReference(file,'');
+  }
+  async function saveReference(file:File|null=referenceFile,transcript=referenceTranscript){
+    if(!file)return;
+    if(needsTranscript&&!transcript.trim()){setReferenceError('Add the exact words spoken in the reference WAV.');return}
+    setSavingReference(true);setReferenceError('');
+    try{
+      const base64=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('Could not read WAV'));reader.readAsDataURL(file)});
+      const response=await fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:file.name.replace(/\.wav$/i,''),transcript:transcript.trim(),audio_base64:base64,model_id:modelId})});
+      const data=await response.json();if(!response.ok)throw new Error(data.detail||'Could not add voice');
+      setProfiles(previous=>[...previous,data]);setProfileId(data.id);setVoiceSource('clone');setReferenceFile(null);setReferenceTranscript('');
+    }catch(e){setReferenceError((e as Error).message)}finally{setSavingReference(false)}
+  }
   const isQwen=selected?.family==='qwen';const isChatter=selected?.family==='chatterbox';const isReference=selected?.control==='reference';const isContext=selected?.control==='context';const isProfile=isReference||isChatter||isContext;
   return <div className="app-shell"><header className="topbar"><div className="brand"><span className="brand-icon"><AudioLines size={22}/></span><div><div className="brand-name">VOX <span>ATELIER</span></div><div className="brand-subtitle">LOCAL VOICE STUDIO</div></div></div><div className="topbar-right"><span className="privacy-dot"/> PRIVATE WORKSPACE <span className="header-divider"/><span className="machine-label">D:\models</span></div></header>
     <main className="workspace"><div className="hero"><div><div className="eyebrow"><span className="eyebrow-line"/> YOUR AUDIO WORKSPACE / 01</div><h1>Give your words <em>a voice.</em></h1><p>Explore expressive speech across the models already on your machine.</p></div><div className="hero-decoration"><div className="orb"><span/><span/><span/><span/><span/><span/><span/><span/><span/></div><div className="orb-caption">WORDS → FEELING → SOUND</div></div></div>
@@ -50,14 +72,19 @@ function App(){
       {selected?.control==='named'&&<Select label="SPEAKER" value={voice} options={speakerNames.map(v=>({value:v,label:v}))} onValueChange={setVoice}/>}
       {selected?.control==='context'&&<Select label="SPEAKER" value={voice} options={[{value:'0',label:'Speaker 0'},{value:'1',label:'Speaker 1'}]} onValueChange={setVoice}/>}
       {isProfile&&<>
-        {!isReference&&<Select label="VOICE SOURCE" value={voiceSource} options={[{value:'builtin',label:'Built-in voice'},{value:'clone',label:'Clone from reference'}]} onValueChange={setVoiceSource}/>}
-        {isReference&&<div className="field-title">VOICE CLONING</div>}
-        {cloneActive&&<>
-          <Select label="SAVED REFERENCE VOICE" value={profileId} options={profiles.filter(p=>!(isReference||isContext)||!!p.transcript).map(p=>({value:p.id,label:p.name}))} onValueChange={setProfileId} placeholder="Choose a saved voice"/>
-          <button className="quiet-link" onClick={()=>setShowProfile(!showProfile)}><Plus size={15}/> Save a reference voice</button>
-          <p className="field-note">{isReference||isContext?'Add the exact spoken transcript once. The saved voice is reused for later generations.':selected?.control==='tags'?'Use a WAV longer than 5 seconds. The saved voice is reused for later generations.':'The saved WAV is reused for later generations.'}</p>
-          {showProfile&&<div className="profile-form"><input aria-label="Profile name" placeholder="Voice name" value={profileName} onChange={e=>setProfileName(e.target.value)}/><input aria-label="Reference WAV" type="file" accept=".wav,audio/wav" onChange={e=>setProfileFile(e.target.files?.[0]||null)}/>{(isReference||isContext)&&<textarea aria-label="Reference transcript" placeholder="Exact words spoken in the reference WAV" value={profileTranscript} onChange={e=>setProfileTranscript(e.target.value)}/>}<Button size="sm" onClick={saveProfile} disabled={!profileFile||((isReference||isContext)&&!profileTranscript.trim())}>Save voice</Button></div>}
-        </>}
+        {!isReference&&<div className="voice-choice" role="group" aria-label="Voice source">
+          <button type="button" className={voiceSource==='builtin'?'selected':''} aria-pressed={voiceSource==='builtin'} onClick={()=>setVoiceSource('builtin')}><strong>Built-in voice</strong><small>Ready to use</small></button>
+          <button type="button" className={voiceSource==='clone'?'selected':''} aria-pressed={voiceSource==='clone'} onClick={()=>setVoiceSource('clone')}><strong>Reference recording</strong><small>Use your own WAV</small></button>
+        </div>}
+        {cloneActive&&<div className="reference-panel">
+          <label className="reference-upload"><Upload size={18}/><span><strong>{referenceFile?.name||'Choose a WAV recording'}</strong><small>{needsTranscript?'Add its spoken words once to reuse this voice.':'Saved locally for later use.'}</small></span><input aria-label="Reference WAV" type="file" accept=".wav,audio/wav" disabled={savingReference} onChange={event=>{chooseReference(event.target.files?.[0]||null);event.target.value=''}}/></label>
+          {needsTranscript&&referenceFile&&<div className="reference-transcript"><label htmlFor="reference-transcript">WORDS SPOKEN IN THE RECORDING</label><textarea id="reference-transcript" placeholder="Exact transcript of the reference WAV" value={referenceTranscript} onChange={event=>setReferenceTranscript(event.target.value)}/></div>}
+          {referenceFile&&!savingReference&&<Button size="sm" onClick={()=>void saveReference()} disabled={needsTranscript&&!referenceTranscript.trim()}>Use this voice</Button>}
+          {savingReference&&<p className="reference-status" role="status">Adding your voice…</p>}
+          {referenceError&&<p className="inline-error" role="alert">{referenceError}</p>}
+          {eligibleProfiles.length>0&&<Select label="SAVED VOICES" value={activeProfileId} options={eligibleProfiles.map(profile=>({value:profile.id,label:profile.name}))} onValueChange={id=>{setProfileId(id);setVoiceSource('clone');setReferenceFile(null);setReferenceTranscript('');setReferenceError('')}} placeholder="Choose a saved voice"/>}
+          <p className="field-note">{selected?.control==='tags'?'Turbo and Nano need a recording longer than five seconds.':needsTranscript?'The transcript is required by this model. Your voice stays saved on this machine.':'Choose a WAV and generate. Your voice stays saved on this machine.'}</p>
+        </div>}
       </>}
       <div className="section-rule"><span>EXPRESSION</span></div>
       {selected?.id==='qwen-17-custom'&&<><div className="field-title">EMOTION DIRECTION</div><ChipGroup label="Emotion direction" options={Object.keys(moods).map(v=>({value:v,label:v}))} value={[mood]} onValueChange={changeMood} multiple={false}/><Textarea label="STYLE INSTRUCTION" value={style} onChange={e=>setStyle(e.target.value)} rows={3} placeholder="Describe how the voice should feel…"/></>}

@@ -53,7 +53,7 @@ lock=asyncio.Lock()
 
 class LoadBody(BaseModel): model_id:str
 class GenerateBody(BaseModel): model_id:str; text:str; mode:str='full'; voice:str='Ryan'; style:str=''; profile_id:str=''; exaggeration:float=.5; cfg_weight:float=.5; temperature:float=.8; top_p:float=.9; top_k:int=100; repetition_penalty:float=1.2
-class ProfileBody(BaseModel): name:str; transcript:str=''; audio_base64:str
+class ProfileBody(BaseModel): name:str; transcript:str=''; audio_base64:str; model_id:str=''
 
 async def stop_worker():
     proc=state['proc']
@@ -129,8 +129,21 @@ def add_profile(body:ProfileBody):
     if len(data)>20_000_000: raise HTTPException(413,'Reference audio exceeds 20 MB')
     if not data: raise HTTPException(400,'Empty audio file')
     if data[:4]!=b'RIFF' or data[8:12]!=b'WAVE': raise HTTPException(400,'Reference must be a WAV file')
+    offset=12; byte_rate=0; audio_bytes=0
+    while offset+8<=len(data):
+        chunk=data[offset:offset+4]; size=int.from_bytes(data[offset+4:offset+8],'little'); offset+=8
+        if offset+size>len(data): raise HTTPException(400,'Invalid WAV file')
+        if chunk==b'fmt ':
+            if size<16: raise HTTPException(400,'Invalid WAV format')
+            byte_rate=int.from_bytes(data[offset+8:offset+12],'little')
+        elif chunk==b'data': audio_bytes+=size
+        offset+=size+(size&1)
+    if not byte_rate or not audio_bytes: raise HTTPException(400,'WAV contains no readable audio')
+    duration_seconds=audio_bytes/byte_rate
+    if body.model_id in ('chatterbox-turbo','chatterbox-nano') and duration_seconds<=5:
+        raise HTTPException(400,'Turbo and Nano need a reference recording longer than five seconds')
     id=uuid.uuid4().hex[:12]; audio=PROFILES/(id+'.wav'); audio.write_bytes(data)
-    profile={'id':id,'name':body.name.strip() or 'Untitled voice','transcript':body.transcript.strip(),'path':str(audio)}
+    profile={'id':id,'name':body.name.strip() or 'Untitled voice','transcript':body.transcript.strip(),'path':str(audio),'duration_seconds':round(duration_seconds,3)}
     (PROFILES/(id+'.json')).write_text(json.dumps(profile),encoding='utf-8')
     return profile
 
