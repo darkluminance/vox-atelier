@@ -1,0 +1,30 @@
+# Local runtimes and frontend build
+.venv*/
+node_modules/
+dist/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+
+# Private voice references, generated audio, and logs
+data/
+*.wav
+*.log
+
+# Local configuration and model weights
+.env
+.env.*
+!.env.example
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.gguf
+.cache/
+
+# Editor and OS state
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
